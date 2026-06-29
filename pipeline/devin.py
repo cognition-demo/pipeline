@@ -105,7 +105,7 @@ class LiveDevinClient:
 
         # PR URL lives in pull_requests array
         prs = data.get("pull_requests") or []
-        pr_url = prs[0]["pr_url"] if prs else None
+        pr_url = prs[0].get("pr_url") if prs else None
 
         # Structured output if requested; fall back to session URL for display
         output = data.get("structured_output") or data.get("url")
@@ -127,12 +127,19 @@ class ReplayDevinClient:
         self._counter += 1
         sid = f"replay-session-{self._counter:04d}"
         path = FIXTURES_DIR / f"{self._fixture}.json"
+        if not path.exists():
+            raise FileNotFoundError(f"Fixture file not found: {path}")
         with open(path) as f:
-            self._sequences[sid] = json.load(f)
+            data = json.load(f)
+        if not isinstance(data, list) or not data:
+            raise ValueError(f"Fixture {path} must be a non-empty JSON array")
+        self._sequences[sid] = data
         self._cursors[sid] = 0
         return sid
 
     async def poll(self, session_id: str) -> SessionPoll:
+        if session_id not in self._sequences:
+            raise KeyError(f"Unknown session: {session_id}")
         sequence = self._sequences[session_id]
         idx = self._cursors[session_id]
         frame = sequence[idx]

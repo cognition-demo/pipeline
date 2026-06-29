@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
 
 import aiosqlite
+
+logger = logging.getLogger(__name__)
 
 DB_PATH = Path(__file__).parent.parent / "data" / "pipeline.db"
 
@@ -58,7 +61,10 @@ class StateStore:
                 ),
             )
             await db.commit()
-            return cur.lastrowid
+            row_id = cur.lastrowid
+            if row_id is None:
+                raise RuntimeError("Failed to insert incident: no row ID returned")
+            return row_id
 
     async def upsert_session(self, session: dict) -> None:
         async with aiosqlite.connect(self._path) as db:
@@ -110,8 +116,13 @@ class StateStore:
         result = []
         for r in rows:
             d = dict(r)
-            d["failing_tests"] = json.loads(d["failing_tests"] or "[]")
-            d["upstream_commits"] = json.loads(d["upstream_commits"] or "[]")
+            for field in ("failing_tests", "upstream_commits"):
+                raw = d.get(field) or "[]"
+                try:
+                    d[field] = json.loads(raw)
+                except (json.JSONDecodeError, TypeError):
+                    logger.warning("Corrupted JSON in %s for incident %s: %r", field, d.get("issue_number"), raw)
+                    d[field] = []
             result.append(d)
         return result
 

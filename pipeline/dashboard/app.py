@@ -4,6 +4,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import json as _json
+import logging
 import os
 import re
 from datetime import datetime, timezone
@@ -14,6 +16,8 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from pipeline.state import StateStore
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Sync Incident Pipeline")
 _store: StateStore | None = None
@@ -38,16 +42,22 @@ async def index() -> FileResponse:
 
 # ── API ──────────────────────────────────────────────────────────────────────
 
+def _require_store() -> StateStore:
+    if _store is None:
+        raise HTTPException(status_code=503, detail="Store not initialized")
+    return _store
+
+
 @app.get("/api/incidents")
 async def get_incidents() -> list[dict]:
-    assert _store
-    return await _store.get_all()
+    store = _require_store()
+    return await store.get_all()
 
 
 @app.get("/api/metrics")
 async def get_metrics() -> dict[str, Any]:
-    assert _store
-    rows = await _store.get_all()
+    store = _require_store()
+    rows = await store.get_all()
     sessions = [r for r in rows if r.get("session_id")]
     completed = [s for s in sessions if s.get("status") == "completed"]
     fix_times = []
@@ -73,9 +83,9 @@ async def health() -> dict:
 @app.post("/api/reset")
 async def reset_state(request: Request) -> dict:
     """Clear all pipeline state. Protected by WEBHOOK_SECRET."""
-    assert _store
+    store = _require_store()
     _verify_secret(request)
-    await _store.reset()
+    await store.reset()
     return {"status": "reset"}
 
 
@@ -95,12 +105,16 @@ def _fire_session(incident: dict) -> None:
     from pipeline.devin import make_client
     from pipeline.orchestrator import run_session
 
+    store = _require_store()
+
     async def _run() -> None:
-        assert _store
-        incident_id = await _store.save_incident(incident)
-        mode = os.environ.get("PIPELINE_MODE", "replay")
-        client = make_client(mode)
-        await run_session(incident_id, incident, client, _store)
+        try:
+            incident_id = await store.save_incident(incident)
+            mode = os.environ.get("PIPELINE_MODE", "replay")
+            client = make_client(mode)
+            await run_session(incident_id, incident, client, store)
+        except Exception:
+            logger.exception("Background session failed for incident %s", incident.get("issue_url", "?"))
 
     asyncio.create_task(_run())
 
@@ -108,11 +122,13 @@ def _fire_session(incident: dict) -> None:
 @app.post("/webhook/trigger")
 async def direct_trigger(request: Request) -> dict:
     """Called by the nightly sync GitHub Action with full incident context."""
-    assert _store
+    _require_store()
     _verify_secret(request)
 
-    import json as _json
-    payload = _json.loads(await request.body())
+    try:
+        payload = _json.loads(await request.body())
+    except (ValueError, _json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid JSON: {exc}") from exc
     incident = {
         "issue_number": payload.get("issue_number", 0),
         "issue_url": payload.get("issue_url", ""),
@@ -128,7 +144,7 @@ async def direct_trigger(request: Request) -> dict:
 @app.post("/webhook/github")
 async def github_webhook(request: Request) -> dict:
     """Receive native GitHub issue-opened webhook events (alternative trigger)."""
-    assert _store
+    _require_store()
 
     secret = os.environ.get("WEBHOOK_SECRET", "")
     body = await request.body()
@@ -139,15 +155,19 @@ async def github_webhook(request: Request) -> dict:
         if not hmac.compare_digest(sig, expected):
             raise HTTPException(status_code=401, detail="Invalid signature")
 
-    import json as _json
-    payload = _json.loads(body)
+    try:
+        payload = _json.loads(body)
+    except (ValueError, _json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid JSON: {exc}") from exc
     event = request.headers.get("X-GitHub-Event", "")
 
     if event != "issues" or payload.get("action") != "opened":
         return {"ignored": True}
 
-    issue = payload["issue"]
-    labels = [lbl["name"] for lbl in issue.get("labels", [])]
+    issue = payload.get("issue")
+    if not isinstance(issue, dict):
+        raise HTTPException(status_code=400, detail="Missing or invalid 'issue' in payload")
+    labels = [lbl["name"] for lbl in issue.get("labels", []) if isinstance(lbl, dict)]
     if "upstream-sync-failure" not in labels:
         return {"ignored": True}
 

@@ -2,20 +2,24 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import datetime, timezone
 
 from rich.console import Console
 
-from pipeline.devin import ReplayDevinClient
+from pipeline.devin import LiveDevinClient, ReplayDevinClient
 from pipeline.state import StateStore
 
+logger = logging.getLogger(__name__)
 console = Console()
+
+MAX_CONSECUTIVE_ERRORS = 5
 
 
 async def run_session(
     incident_id: int,
     incident: dict,
-    client: ReplayDevinClient,
+    client: LiveDevinClient | ReplayDevinClient,
     store: StateStore,
 ) -> None:
     started = datetime.now(timezone.utc).isoformat()
@@ -29,8 +33,32 @@ async def run_session(
         "started_at": started,
     })
 
+    consecutive_errors = 0
     while True:
-        poll = await client.poll(session_id)
+        try:
+            poll = await client.poll(session_id)
+        except Exception:
+            consecutive_errors += 1
+            logger.warning(
+                "Poll error for session %s (%d/%d)",
+                session_id, consecutive_errors, MAX_CONSECUTIVE_ERRORS,
+                exc_info=True,
+            )
+            if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+                logger.error("Too many consecutive poll errors for session %s; marking failed", session_id)
+                await store.upsert_session({
+                    "incident_id": incident_id,
+                    "session_id": session_id,
+                    "status": "failed",
+                    "started_at": started,
+                    "completed_at": datetime.now(timezone.utc).isoformat(),
+                })
+                console.print(f"  [red]✗[/] Session {session_id} failed after {MAX_CONSECUTIVE_ERRORS} consecutive poll errors")
+                return
+            await asyncio.sleep(2 ** consecutive_errors)
+            continue
+
+        consecutive_errors = 0
         await store.upsert_session({
             "incident_id": incident_id,
             "session_id": session_id,
