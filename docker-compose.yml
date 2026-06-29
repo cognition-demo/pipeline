@@ -1,0 +1,15 @@
+services:
+  pipeline:
+    build: .
+    ports:
+      - "8765:8765"
+    environment:
+      PIPELINE_MODE: ${PIPELINE_MODE:-replay}
+      DEVIN_API_KEY: ${DEVIN_API_KEY:-}
+      DEVIN_ORG_ID: ${DEVIN_ORG_ID:-}
+      WEBHOOK_SECRET: ${WEBHOOK_SECRET:-}
+    volumes:
+      - pipeline-data:/app/data
+
+volumes:
+  pipeline-data:

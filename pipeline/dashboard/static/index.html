@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Sync Incident Pipeline</title>
+  <style>
+    :root {
+      --bg: #0d1117; --surface: #161b22; --border: #30363d;
+      --text: #e6edf3; --muted: #8b949e;
+      --blue: #58a6ff; --green: #3fb950; --yellow: #d29922;
+      --red: #f85149; --purple: #bc8cff;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", monospace; font-size: 14px; }
+    header { border-bottom: 1px solid var(--border); padding: 16px 32px; display: flex; align-items: center; gap: 12px; }
+    header h1 { font-size: 16px; font-weight: 600; }
+    header .badge { background: var(--blue); color: #000; font-size: 11px; padding: 2px 8px; border-radius: 12px; font-weight: 700; }
+    .metrics { display: flex; gap: 16px; padding: 24px 32px; flex-wrap: wrap; }
+    .metric { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px 24px; min-width: 160px; }
+    .metric .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .05em; margin-bottom: 6px; }
+    .metric .value { font-size: 28px; font-weight: 700; }
+    .metric .value.green { color: var(--green); }
+    .metric .value.blue { color: var(--blue); }
+    .incidents { padding: 0 32px 32px; }
+    .incidents h2 { font-size: 13px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; margin-bottom: 12px; }
+    .card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 20px 24px; margin-bottom: 12px; }
+    .card-header { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+    .status-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+    .status-dot.running { background: var(--blue); animation: pulse 1.2s infinite; }
+    .status-dot.completed { background: var(--green); }
+    .status-dot.pending { background: var(--yellow); }
+    .status-dot.failed { background: var(--red); }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+    .card-title { font-weight: 600; font-size: 15px; }
+    .card-meta { color: var(--muted); font-size: 12px; margin-left: auto; }
+    .tests { margin-bottom: 12px; }
+    .test-item { font-family: monospace; font-size: 12px; color: var(--red); padding: 2px 0; }
+    .test-item::before { content: "✗ "; }
+    .commits { margin-bottom: 12px; }
+    .commit-item { font-family: monospace; font-size: 12px; color: var(--purple); padding: 2px 0; }
+    .commit-item::before { content: "↑ "; }
+    details.session-log { margin-bottom: 12px; }
+    details.session-log summary { cursor: pointer; font-size: 12px; color: var(--muted); user-select: none; list-style: none; display: flex; align-items: center; gap: 6px; }
+    details.session-log summary::-webkit-details-marker { display: none; }
+    details.session-log summary::before { content: "▶"; font-size: 10px; transition: transform .15s; display: inline-block; }
+    details.session-log[open] summary::before { transform: rotate(90deg); }
+    details.session-log summary:hover { color: var(--text); }
+    .summary { background: var(--bg); border-radius: 6px; padding: 12px; font-size: 12px; color: var(--muted); line-height: 1.6; margin-top: 8px; font-family: monospace; white-space: pre-wrap; max-height: 200px; overflow-y: auto; }
+    .card-footer { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+    .pr-link { background: var(--green); color: #000; font-size: 12px; font-weight: 700; padding: 4px 12px; border-radius: 6px; text-decoration: none; }
+    .session-link { color: var(--blue); font-size: 12px; text-decoration: none; }
+    .session-link:hover { text-decoration: underline; }
+    .fix-time { color: var(--muted); font-size: 12px; }
+    .fix-time span { color: var(--green); font-weight: 600; }
+    .empty { color: var(--muted); text-align: center; padding: 48px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Sync Incident Pipeline</h1>
+    <span class="badge">Devin</span>
+  </header>
+
+  <div class="metrics">
+    <div class="metric"><div class="label">Incidents</div><div class="value blue" id="m-incidents">—</div></div>
+    <div class="metric"><div class="label">Active Sessions</div><div class="value blue" id="m-running">—</div></div>
+    <div class="metric"><div class="label">Resolved</div><div class="value green" id="m-completed">—</div></div>
+    <div class="metric"><div class="label">Avg Fix Time</div><div class="value green" id="m-avgtime">—</div></div>
+    <div class="metric"><div class="label">PRs Opened</div><div class="value green" id="m-prs">—</div></div>
+  </div>
+
+  <div class="incidents">
+    <h2>Incidents</h2>
+    <div id="incident-list"><div class="empty">Waiting for incidents...</div></div>
+  </div>
+
+  <script>
+    function fmtTime(secs) {
+      if (!secs) return null;
+      if (secs < 60) return secs + 's';
+      return Math.floor(secs / 60) + 'm ' + (secs % 60) + 's';
+    }
+
+    async function refresh() {
+      try {
+        const [incidents, metrics] = await Promise.all([
+          fetch('/api/incidents').then(r => r.json()),
+          fetch('/api/metrics').then(r => r.json()),
+        ]);
+
+        document.getElementById('m-incidents').textContent = metrics.total_incidents ?? '0';
+        document.getElementById('m-running').textContent = metrics.sessions_running ?? '0';
+        document.getElementById('m-completed').textContent = metrics.sessions_completed ?? '0';
+        document.getElementById('m-avgtime').textContent = fmtTime(metrics.avg_time_to_fix_seconds) ?? '—';
+        document.getElementById('m-prs').textContent = metrics.prs_opened ?? '0';
+
+        const list = document.getElementById('incident-list');
+        if (!incidents.length) {
+          list.innerHTML = '<div class="empty">Waiting for incidents...</div>';
+          return;
+        }
+        list.innerHTML = incidents.map(inc => {
+          const status = inc.session_id ? (inc.status || 'pending') : 'pending';
+          const tests = (inc.failing_tests || []).map(t =>
+            `<div class="test-item">${t.split('::').pop()}</div>`).join('');
+          const commits = (inc.upstream_commits || []).map(c =>
+            `<div class="commit-item">${c}</div>`).join('');
+          const summary = inc.devin_summary ? `
+            <details class="session-log">
+              <summary>Session log</summary>
+              <div class="summary">${inc.devin_summary}</div>
+            </details>` : '';
+          const sessionLink = inc.session_id && !inc.session_id.startsWith('replay-')
+            ? `<a class="session-link" href="https://app.devin.ai/sessions/${inc.session_id}" target="_blank">Devin session ↗</a>` : '';
+          const pr = inc.pr_url
+            ? `<a class="pr-link" href="${inc.pr_url}" target="_blank">View PR →</a>` : '';
+          const ft = inc.started_at && inc.completed_at
+            ? `<div class="fix-time">Fixed in <span>${fmtTime(
+                Math.round((new Date(inc.completed_at) - new Date(inc.started_at)) / 1000)
+              )}</span></div>` : '';
+          return `
+            <div class="card">
+              <div class="card-header">
+                <div class="status-dot ${status}"></div>
+                <div class="card-title">Issue #${inc.issue_number} — Upstream sync failure</div>
+                <div class="card-meta">${inc.repo} · ${status}</div>
+              </div>
+              <div class="tests">${tests}</div>
+              <div class="commits">${commits}</div>
+              ${summary}
+              <div class="card-footer">${pr}${sessionLink}${ft}</div>
+            </div>`;
+        }).join('');
+      } catch (e) {
+        console.error(e);
+      }
+    }
+
+    refresh();
+    setInterval(refresh, 2000);
+  </script>
+</body>
+</html>
