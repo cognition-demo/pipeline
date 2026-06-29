@@ -68,6 +68,22 @@
   </div>
 
   <script>
+    function esc(str) {
+      const d = document.createElement('div');
+      d.textContent = str;
+      return d.innerHTML;
+    }
+
+    function sanitizeUrl(url) {
+      try {
+        const parsed = new URL(url);
+        if (parsed.protocol === 'https:' || parsed.protocol === 'http:') return parsed.href;
+      } catch (_) {}
+      return '';
+    }
+
+    const VALID_STATUSES = new Set(['pending', 'running', 'completed', 'failed']);
+
     function fmtTime(secs) {
       if (!secs) return null;
       if (secs < 60) return secs + 's';
@@ -93,25 +109,28 @@
           return;
         }
         list.innerHTML = incidents.map(inc => {
-          const status = inc.session_id ? (inc.status || 'pending') : 'pending';
+          const rawStatus = inc.session_id ? (inc.status || 'pending') : 'pending';
+          const status = VALID_STATUSES.has(rawStatus) ? rawStatus : 'pending';
           const tests = (inc.failing_tests || []).map(t =>
-            `<div class="test-item">${t.split('::').pop()}</div>`).join('');
+            `<div class="test-item">${esc(t.split('::').pop())}</div>`).join('');
           const commits = (inc.upstream_commits || []).map(c =>
-            `<div class="commit-item">${c}</div>`).join('');
+            `<div class="commit-item">${esc(c)}</div>`).join('');
           const summary = inc.devin_summary
-            ? `<div class="summary">${inc.devin_summary}</div>` : '';
-          const pr = inc.pr_url
-            ? `<a class="pr-link" href="${inc.pr_url}" target="_blank">View PR →</a>` : '';
+            ? `<div class="summary">${esc(inc.devin_summary)}</div>` : '';
+          const safeUrl = inc.pr_url ? sanitizeUrl(inc.pr_url) : '';
+          const pr = safeUrl
+            ? `<a class="pr-link" href="${esc(safeUrl)}" target="_blank" rel="noopener noreferrer">View PR →</a>` : '';
           const ft = inc.started_at && inc.completed_at
-            ? `<div class="fix-time">Fixed in <span>${fmtTime(
+            ? `<div class="fix-time">Fixed in <span>${esc(fmtTime(
                 Math.round((new Date(inc.completed_at) - new Date(inc.started_at)) / 1000)
-              )}</span></div>` : '';
+              ) || '')}</span></div>` : '';
+          const issueNum = Number.isFinite(inc.issue_number) ? inc.issue_number : 0;
           return `
             <div class="card">
               <div class="card-header">
                 <div class="status-dot ${status}"></div>
-                <div class="card-title">Issue #${inc.issue_number} — Upstream sync failure</div>
-                <div class="card-meta">${inc.repo} · ${status}</div>
+                <div class="card-title">Issue #${issueNum} — Upstream sync failure</div>
+                <div class="card-meta">${esc(inc.repo || '')} · ${status}</div>
               </div>
               <div class="tests">${tests}</div>
               <div class="commits">${commits}</div>
