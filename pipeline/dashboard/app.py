@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import logging
 import os
 import re
 from datetime import datetime, timezone
@@ -14,6 +15,8 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from pipeline.state import StateStore
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Sync Incident Pipeline")
 _store: StateStore | None = None
@@ -38,16 +41,20 @@ async def index() -> FileResponse:
 
 # ── API ──────────────────────────────────────────────────────────────────────
 
+def _get_store() -> StateStore:
+    if _store is None:
+        raise HTTPException(status_code=503, detail="Store not initialised")
+    return _store
+
+
 @app.get("/api/incidents")
 async def get_incidents() -> list[dict]:
-    assert _store
-    return await _store.get_all()
+    return await _get_store().get_all()
 
 
 @app.get("/api/metrics")
 async def get_metrics() -> dict[str, Any]:
-    assert _store
-    rows = await _store.get_all()
+    rows = await _get_store().get_all()
     sessions = [r for r in rows if r.get("session_id")]
     completed = [s for s in sessions if s.get("status") == "completed"]
     fix_times = []
@@ -72,18 +79,33 @@ async def health() -> dict:
 
 @app.post("/api/reset")
 async def reset_state(request: Request) -> dict:
-    """Clear all pipeline state. Protected by GITHUB_WEBHOOK_SECRET."""
-    assert _store
-    _verify_secret(request)
-    await _store.reset()
+    """Clear all pipeline state. Always requires GITHUB_WEBHOOK_SECRET."""
+    store = _get_store()
+    _require_secret(request)
+    await store.reset()
     return {"status": "reset"}
 
 
 # ── Webhooks ─────────────────────────────────────────────────────────────────
 
-def _verify_secret(request: Request) -> None:
+def _require_secret(request: Request) -> None:
+    """Reject the request unless GITHUB_WEBHOOK_SECRET is set and matches."""
     secret = os.environ.get("GITHUB_WEBHOOK_SECRET", "")
     if not secret:
+        raise HTTPException(
+            status_code=403,
+            detail="GITHUB_WEBHOOK_SECRET is not configured; endpoint disabled",
+        )
+    provided = request.headers.get("X-Webhook-Secret", "")
+    if not hmac.compare_digest(provided, secret):
+        raise HTTPException(status_code=401, detail="Invalid secret")
+
+
+def _verify_webhook_secret(request: Request) -> None:
+    """Soft verification for webhook endpoints — warns but allows when unset."""
+    secret = os.environ.get("GITHUB_WEBHOOK_SECRET", "")
+    if not secret:
+        logger.warning("GITHUB_WEBHOOK_SECRET is not set — webhook accepted without verification")
         return
     provided = request.headers.get("X-Webhook-Secret", "")
     if not hmac.compare_digest(provided, secret):
@@ -95,32 +117,56 @@ def _fire_session(incident: dict) -> None:
     from pipeline.devin import make_client
     from pipeline.orchestrator import run_session
 
+    store = _get_store()
+
     async def _run() -> None:
-        assert _store
-        incident_id = await _store.save_incident(incident)
+        incident_id = await store.save_incident(incident)
         mode = os.environ.get("PIPELINE_MODE", "replay")
         client = make_client(mode)
-        await run_session(incident_id, incident, client, _store)
+        await run_session(incident_id, incident, client, store)
 
     asyncio.create_task(_run())
+
+
+class _TriggerPayload:
+    """Minimal validation for the /webhook/trigger payload."""
+
+    REQUIRED = ("issue_number", "issue_url", "repo")
+
+    @classmethod
+    def parse(cls, raw: bytes) -> dict:
+        import json as _json
+        try:
+            payload = _json.loads(raw)
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(status_code=400, detail="Invalid JSON") from exc
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="Expected JSON object")
+        missing = [k for k in cls.REQUIRED if k not in payload]
+        if missing:
+            raise HTTPException(status_code=400, detail=f"Missing fields: {', '.join(missing)}")
+        if not isinstance(payload.get("issue_number"), int):
+            raise HTTPException(status_code=400, detail="issue_number must be an integer")
+        for list_field in ("failing_tests", "upstream_commits"):
+            val = payload.get(list_field, [])
+            if not isinstance(val, list) or not all(isinstance(v, str) for v in val):
+                raise HTTPException(status_code=400, detail=f"{list_field} must be a list of strings")
+        return {
+            "issue_number": payload["issue_number"],
+            "issue_url": str(payload["issue_url"]),
+            "repo": str(payload["repo"]),
+            "failing_tests": payload.get("failing_tests", []),
+            "upstream_commits": payload.get("upstream_commits", []),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
 
 
 @app.post("/webhook/trigger")
 async def direct_trigger(request: Request) -> dict:
     """Called by the nightly sync GitHub Action with full incident context."""
-    assert _store
-    _verify_secret(request)
-
-    import json as _json
-    payload = _json.loads(await request.body())
-    incident = {
-        "issue_number": payload.get("issue_number", 0),
-        "issue_url": payload.get("issue_url", ""),
-        "repo": payload.get("repo", ""),
-        "failing_tests": payload.get("failing_tests", []),
-        "upstream_commits": payload.get("upstream_commits", []),
-        "created_at": datetime.now(timezone.utc).isoformat(),
-    }
+    _get_store()
+    _verify_webhook_secret(request)
+    incident = _TriggerPayload.parse(await request.body())
     _fire_session(incident)
     return {"status": "triggered"}
 
@@ -128,7 +174,7 @@ async def direct_trigger(request: Request) -> dict:
 @app.post("/webhook/github")
 async def github_webhook(request: Request) -> dict:
     """Receive native GitHub issue-opened webhook events (alternative trigger)."""
-    assert _store
+    _get_store()
 
     secret = os.environ.get("GITHUB_WEBHOOK_SECRET", "")
     body = await request.body()
@@ -138,6 +184,8 @@ async def github_webhook(request: Request) -> dict:
         expected = "sha256=" + mac.hexdigest()
         if not hmac.compare_digest(sig, expected):
             raise HTTPException(status_code=401, detail="Invalid signature")
+    else:
+        logger.warning("GITHUB_WEBHOOK_SECRET is not set — webhook accepted without signature verification")
 
     import json as _json
     payload = _json.loads(body)
