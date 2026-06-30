@@ -1,16 +1,18 @@
-"""Devin API client — live and replay modes."""
+"""Devin API client."""
 from __future__ import annotations
 
-import asyncio
-import json
 import os
-from pathlib import Path
 from typing import Any
 
 import httpx
 
 DEVIN_API_BASE = "https://api.devin.ai/v3"
-FIXTURES_DIR = Path(__file__).parent.parent / "fixtures" / "sessions"
+DEVIN_APP_BASE = "https://app.devin.ai/sessions"
+
+
+def session_url(session_id: str) -> str:
+    """Browser URL for a Devin session id."""
+    return f"{DEVIN_APP_BASE}/{session_id.removeprefix('devin-')}"
 
 DEVIN_PROMPT_TEMPLATE = """\
 Our nightly upstream sync ran and CI is now failing. We need you to \
@@ -101,48 +103,11 @@ class LiveDevinClient:
         return SessionPoll(status=status, status_detail=status_detail, output=output, done=done, pr_url=pr_url)
 
 
-class ReplayDevinClient:
-    """Plays back pre-recorded Devin poll sequences from fixtures."""
-
-    def __init__(self, speed_multiplier: float = 10.0, fixture: str = "tenant-auth-fix"):
-        self._speed = speed_multiplier
-        self._fixture = fixture
-        self._sequences: dict[str, list[dict]] = {}
-        self._cursors: dict[str, int] = {}
-        self._counter = 0
-
-    async def create_session(self, incident: Any) -> str:
-        self._counter += 1
-        sid = f"replay-session-{self._counter:04d}"
-        path = FIXTURES_DIR / f"{self._fixture}.json"
-        with open(path) as f:
-            self._sequences[sid] = json.load(f)
-        self._cursors[sid] = 0
-        return sid
-
-    async def poll(self, session_id: str) -> SessionPoll:
-        sequence = self._sequences[session_id]
-        idx = self._cursors[session_id]
-        frame = sequence[idx]
-        delay = frame.get("delay_seconds", 2) / self._speed
-        await asyncio.sleep(delay)
-        if idx < len(sequence) - 1:
-            self._cursors[session_id] += 1
-        status = frame.get("status", "running")
-        status_detail = frame.get("status_detail")
-        output = frame.get("output")
-        done = frame.get("done", False)
-        pr_url = frame.get("pr_url")
-        return SessionPoll(status=status, status_detail=status_detail, output=output, done=done, pr_url=pr_url)
-
-
-def make_client(mode: str) -> LiveDevinClient | ReplayDevinClient:
-    if mode == "live":
-        api_key = os.environ.get("DEVIN_API_KEY", "")
-        org_id = os.environ.get("DEVIN_ORG_ID", "")
-        if not api_key:
-            raise ValueError("DEVIN_API_KEY must be set for live mode")
-        if not org_id:
-            raise ValueError("DEVIN_ORG_ID must be set for live mode")
-        return LiveDevinClient(api_key=api_key, org_id=org_id)
-    return ReplayDevinClient()
+def make_client() -> LiveDevinClient:
+    api_key = os.environ.get("DEVIN_API_KEY", "")
+    org_id = os.environ.get("DEVIN_ORG_ID", "")
+    if not api_key:
+        raise ValueError("DEVIN_API_KEY must be set")
+    if not org_id:
+        raise ValueError("DEVIN_ORG_ID must be set")
+    return LiveDevinClient(api_key=api_key, org_id=org_id)

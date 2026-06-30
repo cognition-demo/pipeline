@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 
 from rich.console import Console
 
-from pipeline.devin import ReplayDevinClient
+from pipeline.devin import LiveDevinClient, session_url
 from pipeline.state import StateStore
 
 console = Console()
@@ -15,12 +15,12 @@ console = Console()
 async def run_session(
     incident_id: int,
     incident: dict,
-    client: ReplayDevinClient,
+    client: LiveDevinClient,
     store: StateStore,
 ) -> None:
     started = datetime.now(timezone.utc).isoformat()
     session_id = await client.create_session(_IncidentProxy(incident))
-    console.print(f"  [blue]→[/] Devin session [bold]{session_id}[/] started")
+    console.print(f"  [blue]→[/] Devin session started: [underline]{session_url(session_id)}[/]")
 
     await store.upsert_session({
         "incident_id": incident_id,

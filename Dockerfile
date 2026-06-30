@@ -5,5 +5,4 @@ RUN pip install -e ".[dev]" 2>/dev/null || pip install fastapi uvicorn[standard]
 COPY . .
 RUN pip install -e .
 EXPOSE 8765
-ENV PIPELINE_MODE=replay
 CMD ["pipeline", "dashboard"]

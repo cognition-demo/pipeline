@@ -15,16 +15,21 @@ from pipeline.state import StateStore
 
 console = Console()
 
+TARGET_REPO = os.environ.get("TARGET_REPO", "cognition-demo/superset")
+
 DEMO_INCIDENT = {
     "issue_number": 42,
-    "issue_url": "https://github.com/cognition-demo/superset/issues/42",
-    "repo": "cognition-demo/superset",
+    "issue_url": f"https://github.com/{TARGET_REPO}/issues/42",
+    "repo": TARGET_REPO,
     "failing_tests": [
         "tests/unit_tests/extensions/test_tenant_embed.py::test_tenant_rls_rule_is_schema_compatible",
         "tests/unit_tests/extensions/test_tenant_embed.py::test_guest_token_payload_rls_is_schema_compatible",
+        "tests/unit_tests/extensions/test_tenant_provisioner.py::test_valid_payload_loads_successfully",
+        "tests/unit_tests/extensions/test_tenant_provisioner.py::test_provision_tenant_returns_provisioned_status",
     ],
     "upstream_commits": [
         "0fd244b fix(security): reject unknown fields on guest-token RLS rules (#41217)",
+        "919bd35 chore(deps): bump marshmallow from 3.26.2 to 4.3.0 (#39751)",
     ],
 }
 
@@ -35,18 +40,14 @@ def main() -> None:
 
 
 @main.command()
-@click.option("--mode", type=click.Choice(["live", "replay"]),
-              default=lambda: os.environ.get("PIPELINE_MODE", "replay"),
-              show_default=True)
 @click.option("--host", default="0.0.0.0")
 @click.option("--port", default=8765, type=int)
-def run(mode: str, host: str, port: int) -> None:
+def run(host: str, port: int) -> None:
     """Simulate a sync incident and watch Devin fix it."""
-    os.environ["PIPELINE_MODE"] = mode
-    asyncio.run(_run(mode, host, port))
+    asyncio.run(_run(host, port))
 
 
-async def _run(mode: str, host: str, port: int) -> None:
+async def _run(host: str, port: int) -> None:
     store = StateStore()
     await store.init()
     await store.reset()
@@ -56,7 +57,7 @@ async def _run(mode: str, host: str, port: int) -> None:
     server = uvicorn.Server(config)
     server_task = asyncio.create_task(server.serve())
 
-    console.print(f"\n[bold blue]Pipeline[/] — mode=[bold]{mode}[/]")
+    console.print("\n[bold blue]Pipeline[/]")
     console.print(f"Dashboard: [underline blue]http://localhost:{port}[/]\n")
 
     console.print("[bold]Incident:[/] upstream sync failure detected")
@@ -66,7 +67,7 @@ async def _run(mode: str, host: str, port: int) -> None:
     console.print()
 
     incident_id = await store.save_incident(DEMO_INCIDENT)
-    client = make_client(mode)
+    client = make_client()
 
     console.print("[bold]Triggering Devin...[/]")
     await run_session(incident_id, DEMO_INCIDENT, client, store)

@@ -98,8 +98,7 @@ def _fire_session(incident: dict) -> None:
     async def _run() -> None:
         assert _store
         incident_id = await _store.save_incident(incident)
-        mode = os.environ.get("PIPELINE_MODE", "replay")
-        client = make_client(mode)
+        client = make_client()
         await run_session(incident_id, incident, client, _store)
 
     asyncio.create_task(_run())
