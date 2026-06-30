@@ -8,6 +8,7 @@ services:
       DEVIN_API_KEY: ${DEVIN_API_KEY:-}
       DEVIN_ORG_ID: ${DEVIN_ORG_ID:-}
       TARGET_REPO: ${TARGET_REPO:-cognition-demo/superset}
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
       WEBHOOK_SECRET: ${WEBHOOK_SECRET:-}
     volumes:
       - pipeline-data:/app/data

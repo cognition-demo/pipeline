@@ -9,6 +9,7 @@ import re
 from datetime import datetime, timezone
 from typing import Any
 
+import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -77,6 +78,42 @@ async def reset_state(request: Request) -> dict:
     _verify_secret(request)
     await _store.reset()
     return {"status": "reset"}
+
+
+@app.post("/api/trigger-sync")
+async def trigger_sync() -> dict:
+    """Kick off the nightly upstream-sync workflow on the target repo.
+
+    Lets a reviewer reproduce the whole flow from the dashboard: the workflow
+    rebases the fork onto upstream, the custom-extension tests go red, and the
+    pipeline webhook fires Devin.
+    """
+    token = os.environ.get("GITHUB_TOKEN", "")
+    repo = os.environ.get("TARGET_REPO", "cognition-demo/superset")
+    workflow = os.environ.get("SYNC_WORKFLOW_FILE", "nightly-upstream-sync.yml")
+    ref = os.environ.get("SYNC_REF", "master")
+    if not token:
+        raise HTTPException(status_code=400, detail="GITHUB_TOKEN not set")
+
+    url = f"https://api.github.com/repos/{repo}/actions/workflows/{workflow}/dispatches"
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(
+            url,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+            },
+            json={"ref": ref},
+            timeout=30,
+        )
+    if resp.status_code not in (201, 204):
+        raise HTTPException(status_code=502, detail=f"GitHub API {resp.status_code}: {resp.text}")
+    return {
+        "status": "dispatched",
+        "repo": repo,
+        "actions_url": f"https://github.com/{repo}/actions/workflows/{workflow}",
+    }
 
 
 # ── Webhooks ─────────────────────────────────────────────────────────────────

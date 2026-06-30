@@ -54,12 +54,16 @@
     .fix-time { color: var(--muted); font-size: 12px; }
     .fix-time span { color: var(--green); font-weight: 600; }
     .empty { color: var(--muted); text-align: center; padding: 48px; }
+    header .btn { margin-left: auto; background: var(--blue); color: #000; border: none; border-radius: 6px; padding: 8px 16px; font-size: 13px; font-weight: 600; font-family: inherit; cursor: pointer; }
+    header .btn:hover:not(:disabled) { filter: brightness(1.1); }
+    header .btn:disabled { opacity: .6; cursor: default; }
   </style>
 </head>
 <body>
   <header>
     <h1>Sync Incident Pipeline</h1>
     <span class="badge">Devin</span>
+    <button id="trigger-sync" class="btn">Trigger upstream sync</button>
   </header>
 
   <div class="metrics">
@@ -111,8 +115,8 @@
               <summary>Session log</summary>
               <div class="summary">${inc.devin_summary}</div>
             </details>` : '';
-          const sessionLink = inc.session_id && !inc.session_id.startsWith('replay-')
-            ? `<a class="session-link" href="https://app.devin.ai/sessions/${inc.session_id}" target="_blank">Devin session ↗</a>` : '';
+          const sessionLink = inc.session_id
+            ? `<a class="session-link" href="https://app.devin.ai/sessions/${inc.session_id.replace(/^devin-/, '')}" target="_blank">Devin session ↗</a>` : '';
           const pr = inc.pr_url
             ? `<a class="pr-link" href="${inc.pr_url}" target="_blank">View PR →</a>` : '';
           const ft = inc.started_at && inc.completed_at
@@ -136,6 +140,24 @@
         console.error(e);
       }
     }
+
+    const syncBtn = document.getElementById('trigger-sync');
+    syncBtn.addEventListener('click', async () => {
+      const orig = syncBtn.textContent;
+      syncBtn.disabled = true;
+      syncBtn.textContent = 'Dispatching…';
+      try {
+        const r = await fetch('/api/trigger-sync', { method: 'POST' });
+        const data = await r.json();
+        if (!r.ok) throw new Error(data.detail || 'request failed');
+        syncBtn.textContent = 'Sync dispatched ✓';
+        if (data.actions_url) window.open(data.actions_url, '_blank');
+      } catch (e) {
+        syncBtn.textContent = 'Error: ' + e.message;
+      } finally {
+        setTimeout(() => { syncBtn.textContent = orig; syncBtn.disabled = false; }, 4000);
+      }
+    });
 
     refresh();
     setInterval(refresh, 2000);
